@@ -1,0 +1,106 @@
+from __future__ import print_function
+
+import json
+import boto3
+import decimal
+from botocore.exceptions import ClientError
+import time
+
+
+def unmarshalJson(node):
+    data = {}
+    data["M"] = node
+    return unmarshalValue(data, True)
+
+
+def unmarshalValue(node, mapAsObject):
+    for key, value in node.items():
+        if(key == "S" or key == "N"):
+            return value
+        if(key == "M" or key == "L"):
+            if(key == "M"):
+                if(mapAsObject):
+                    data = {}
+                    for key1, value1 in value.items():
+                        data[key1] = unmarshalValue(value1, mapAsObject)
+                    return data
+            data = []
+            for item in value:
+                data.append(unmarshalValue(item, mapAsObject))
+            return data
+
+# Helper class to convert a DynamoDB item to JSON.
+class DecimalEncoder(json.JSONEncoder):
+    def default(self, o):
+        if isinstance(o, decimal.Decimal):
+            if o % 1 > 0:
+                return float(o)
+            else:
+                return int(o)
+        return super(DecimalEncoder, self).default(o)
+
+print('Loading function')
+
+def lambda_handler(event, context):
+#    print("Received event: " + json.dumps(event, indent=2))
+    batch=[]
+    for record in event['Records']:
+        item={}
+        print("Working on ID: " + record['eventID'])
+        print("Event type: " + json.dumps(record['eventName']))
+#        print("DynamoDB Record Old: " + json.dumps(dict(record['dynamodb']['OldImage']), indent=4, cls=DecimalEncoder))
+#        print("DynamoDB Record Old: " + json.dumps(unmarshalJson(record['dynamodb']['OldImage']), indent=4, cls=DecimalEncoder))
+#        print("DynamoDB Record New: " + json.dumps(unmarshalJson(record['dynamodb']['NewImage']), indent=4, cls=DecimalEncoder))
+        
+        eventName = record['eventName']
+
+        # TODO: Add handling for missing sections in json (e.g. if OldImage is not there)
+        if 'NewImage' in record['dynamodb']:
+            newimg = unmarshalJson(record['dynamodb']['NewImage'])
+        
+        if 'OldImage' in record['dynamodb']:
+            oldimg = unmarshalJson(record['dynamodb']['OldImage'])
+
+        if(eventName == 'MODIFY'):
+            item['id']=newimg['uuid']
+            item['type']="add"
+            item['fields']=newimg
+        elif(eventName == 'INSERT'):
+            item['id']=newimg['uuid']
+            item['type']="add"
+            item['fields']=newimg
+        elif(eventName == 'REMOVE'):
+            item['type']="delete"
+            item['id']=oldimg['uuid']
+        batch.append(item)
+
+    print("Processing batch: " + json.dumps(batch))
+
+#    dynamodb = boto3.resource('dynamodb', region_name='us-west-2', endpoint_url="http://localhost:8000")
+    endpoint_url = "CS_ENDPOINT"
+    client = boto3.client('cloudsearchdomain', endpoint_url=endpoint_url, region_name='us-west-1')
+    s3 = boto3.client('s3')
+    
+    try:
+        response = client.upload_documents(
+            documents=json.dumps(batch),
+            contentType='application/json'
+            )
+        #print(json.dumps(response))
+        print('Successfully processed {} records.'.format(len(event['Records'])))
+    except Exception as e:
+        print("Caught Exception")
+        #print(json.dumps(e))
+#        s3.put_object(Body=json.dumps(newimg), Bucket='places-archive', Key=newimg['uuid'],ContentType='application/json')
+        ids = []
+        ids.append("Error at " + str(time.asctime()))
+        for item in batch:
+            ids.append(item['id'])
+        print("Sending to S3: " + json.dumps(ids))
+        response = s3.put_object(Body=json.dumps(ids), Bucket='places-archive', Key='errors.txt')
+        print(response)
+        #s3.put_object(Body=json.dumps(e), Bucket='places-archive', Key='errors.txt')
+        print('Completed with errors')
+    finally:
+        print("Ready to process next batch")
+        print("")
